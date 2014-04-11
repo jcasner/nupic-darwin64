@@ -101,6 +101,10 @@ def ansi_print(text, esc, file=None, newline=True, flush=False):
         file.flush()
 
 def should_do_markup(file):
+    if os.environ.get('PY_COLORS') == '1':
+        return True
+    if os.environ.get('PY_COLORS') == '0':
+        return False
     return hasattr(file, 'isatty') and file.isatty() \
            and os.environ.get('TERM') != 'dumb' \
            and not (sys.platform.startswith('java') and os._name == 'nt')
@@ -184,12 +188,7 @@ class TerminalWriter(object):
                 markupmsg = self.markup(msg, **kw)
             else:
                 markupmsg = msg
-            try:
-                self._file.write(markupmsg)
-            except UnicodeEncodeError:
-                msg = msg.encode("unicode-escape").decode("ascii")
-                self._file.write(msg)
-            self._file.flush()
+            write_out(self._file, markupmsg)
 
     def line(self, s='', **kw):
         self.write(s, **kw)
@@ -235,12 +234,7 @@ class Win32ConsoleWriter(TerminalWriter):
                     attr |= oldcolors & 0x0007
 
                 SetConsoleTextAttribute(handle, attr)
-            try:
-                self._file.write(msg)
-            except UnicodeEncodeError:
-                msg = msg.encode("unicode-escape").decode("ascii")
-                self._file.write(msg)
-            self._file.flush()
+            write_out(self._file, msg)
             if oldcolors:
                 SetConsoleTextAttribute(handle, oldcolors)
 
@@ -322,3 +316,26 @@ if win32_and_ctypes:
         # and the ending \n causes an empty line to display.
         return info.dwSize.Y, info.dwSize.X - 1
 
+def write_out(fil, msg):
+    # XXX sometimes "msg" is of type bytes, sometimes text which
+    # complicates the situation.  Should we try to enforce unicode?
+    try:
+        # on py27 and above writing out to sys.stdout with an encoding
+        # should usually work for unicode messages (if the encoding is
+        # capable of it)
+        fil.write(msg)
+    except UnicodeEncodeError:
+        # on py26 it might not work because stdout expects bytes
+        if fil.encoding:
+            try:
+                fil.write(msg.encode(fil.encoding))
+            except UnicodeEncodeError:
+                # it might still fail if the encoding is not capable
+                pass
+            else:
+                fil.flush()
+                return
+        # fallback: escape all unicode characters
+        msg = msg.encode("unicode-escape").decode("ascii")
+        fil.write(msg)
+    fil.flush()
