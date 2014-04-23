@@ -23,10 +23,6 @@ To exit this environment when you are done:
 
     deactivate_nupic
 
-To exit this environment when you are done: 
-
-    deactivate_nupic
-
 ## Building nupic requirements
 
 A Makefile is provided should you need to reconstruct this environment.
