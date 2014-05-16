@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Lesser General Public License along
 # with astroid. If not, see <http://www.gnu.org/licenses/>.
 
-from logilab.common.testlib import unittest_main, TestCase
+from logilab.common.testlib import unittest_main, TestCase, require_version
 
 from astroid import ResolveError, MANAGER, Instance, nodes, YES, InferenceError
 from astroid.builder import AstroidBuilder
@@ -135,6 +135,47 @@ multiply(1, 2, 3)
         self.assertEqual(len(infered), 1)
         self.assertIsInstance(infered[0], Instance)
 
+    @require_version('3.0')
+    def test_nameconstant(self):
+        # used to fail for Python 3.4
+        builder = AstroidBuilder()
+        astroid = builder.string_build("def test(x=True): pass")
+        default = astroid.body[0].args.args[0]
+        self.assertEqual(default.name, 'x')
+        self.assertEqual(next(default.infer()).value, True)
+
+    @require_version('2.7')
+    def test_with_infer_assnames(self):
+        builder = AstroidBuilder()
+        data = """
+with open('a.txt') as stream, open('b.txt'):
+    stream.read()
+"""
+        astroid = builder.string_build(data, __name__, __file__)
+        # Used to crash due to the fact that the second
+        # context manager didn't use an assignment name.
+        list(astroid.nodes_of_class(nodes.CallFunc))[-1].infered()
+
+    def test_recursion_regression_issue25(self):
+        builder = AstroidBuilder()
+        data = """
+import recursion as base
+
+_real_Base = base.Base
+
+class Derived(_real_Base):
+    pass
+
+def run():
+    base.Base = Derived
+"""
+        astroid = builder.string_build(data, __name__, __file__)
+        # Used to crash in _is_metaclass, due to wrong
+        # ancestors chain
+        classes = astroid.nodes_of_class(nodes.Class)
+        for klass in classes:
+            # triggers the _is_metaclass call
+            klass.type
 
 class Whatever(object):
     a = property(lambda x: x, lambda x: x)

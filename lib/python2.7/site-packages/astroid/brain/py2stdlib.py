@@ -5,11 +5,15 @@ Currently help understanding of :
 * hashlib.md5 and hashlib.sha1
 """
 
-from astroid import MANAGER, AsStringRegexpPredicate, UseInferenceDefault, inference_tip
+import sys
+
+from astroid import MANAGER, AsStringRegexpPredicate, UseInferenceDefault, inference_tip, YES
+from astroid import exceptions
 from astroid import nodes
 from astroid.builder import AstroidBuilder
 
 MODULE_TRANSFORMS = {}
+PY3K = sys.version_info > (3, 0)
 
 
 # module specific transformation functions #####################################
@@ -66,6 +70,7 @@ class deque(object):
     def remove(self, value): pass
     def reverse(self): pass
     def rotate(self, n): pass
+    def __iter__(self): return self
 
 ''')
 
@@ -141,6 +146,10 @@ class ParseResult(object):
         module.locals[func_name] = func
 
 def subprocess_transform(module):
+    if PY3K:
+        communicate = (bytes('string', 'ascii'), bytes('string', 'ascii'))
+    else:
+        communicate = ('string', 'string')
     fake = AstroidBuilder(MANAGER).string_build('''
 
 class Popen(object):
@@ -155,7 +164,7 @@ class Popen(object):
         pass
 
     def communicate(self, input=None):
-        return ('string', 'string')
+        return %r
     def wait(self):
         return self.returncode
     def poll(self):
@@ -166,7 +175,7 @@ class Popen(object):
         pass
     def kill(self):
         pass
-   ''')
+   ''' % (communicate, ))
 
     for func_name, func in fake.locals.items():
         module.locals[func_name] = func
@@ -183,6 +192,16 @@ MODULE_TRANSFORMS['subprocess'] = subprocess_transform
 
 def infer_named_tuple(node, context=None):
     """Specific inference function for namedtuple CallFunc node"""
+    def infer_first(node):
+        try:
+            value = node.infer().next()
+            if value is YES:
+                raise UseInferenceDefault()
+            else:
+                return value
+        except StopIteration:
+            raise InferenceError()
+
     # node is a CallFunc node, class name as first argument and generated class
     # attributes as second argument
     if len(node.args) != 2:
@@ -191,15 +210,17 @@ def infer_named_tuple(node, context=None):
     # namedtuple list of attributes can be a list of strings or a
     # whitespace-separate string
     try:
-        name = node.args[0].value
+        name = infer_first(node.args[0]).value
+        names = infer_first(node.args[1])
         try:
-            attributes = node.args[1].value.split()
+            attributes = names.value.split()
         except AttributeError:
-            attributes = [const.value for const in node.args[1].elts]
-    except AttributeError:
+            attributes = [infer_first(const).value for const in names.elts]
+    except (AttributeError, exceptions.InferenceError):
         raise UseInferenceDefault()
     # we want to return a Class node instance with proper attributes set
     class_node = nodes.Class(name, 'docstring')
+    class_node.parent = node.parent
     # set base class=tuple
     class_node.bases.append(nodes.Tuple._proxied)
     # XXX add __init__(*attributes) method
@@ -207,9 +228,25 @@ def infer_named_tuple(node, context=None):
         fake_node = nodes.EmptyNode()
         fake_node.parent = class_node
         class_node.instance_attrs[attr] = [fake_node]
+
+    fake = AstroidBuilder(MANAGER).string_build('''
+class %(name)s(tuple):
+    def _asdict(self):
+        return self.__dict__
+    @classmethod
+    def _make(cls, iterable, new=tuple.__new__, len=len):
+        return new(cls, iterable)
+    def _replace(_self, **kwds):
+        result = _self._make(map(kwds.pop, %(fields)r, _self))
+        if kwds:
+            raise ValueError('Got unexpected field names: %%r' %% list(kwds))
+        return result
+    ''' % {'name': name, 'fields': attributes})
+    class_node.locals['_asdict'] = fake.body[0].locals['_asdict']
+    class_node.locals['_make'] = fake.body[0].locals['_make']
+    class_node.locals['_replace'] = fake.body[0].locals['_replace']
     # we use UseInferenceDefault, we can't be a generator so return an iterator
     return iter([class_node])
 
 MANAGER.register_transform(nodes.CallFunc, inference_tip(infer_named_tuple),
                            AsStringRegexpPredicate('namedtuple', 'func'))
-
