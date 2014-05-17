@@ -1,4 +1,4 @@
-# copyright 2003-2013 LOGILAB S.A. (Paris, FRANCE), all rights reserved.
+# copyright 2003-2014 LOGILAB S.A. (Paris, FRANCE), all rights reserved.
 # contact http://www.logilab.fr/ -- mailto:contact@logilab.fr
 #
 # This file is part of astroid.
@@ -19,12 +19,15 @@
 function)
 """
 
+from __future__ import with_statement
+
 import sys
 from os.path import join, abspath, dirname
+from textwrap import dedent
 
-from logilab.common.testlib import TestCase, unittest_main
+from logilab.common.testlib import TestCase, unittest_main, require_version
 
-from astroid import builder, nodes, scoped_nodes, \
+from astroid import YES, builder, nodes, scoped_nodes, \
      InferenceError, NotFoundError, NoDefault
 from astroid.bases import BUILTINS, Instance, BoundMethod, UnboundMethod
 from astroid.test_utils import extract_node
@@ -37,6 +40,7 @@ MODULE2 = abuilder.file_build(join(DATA, 'module2.py'), 'data.module2')
 NONREGR = abuilder.file_build(join(DATA, 'nonregr.py'), 'data.nonregr')
 
 PACK = abuilder.file_build(join(DATA, '__init__.py'), 'data')
+PY3K = sys.version_info >= (3, 0)
 
 def _test_dict_interface(self, node, test_attr):
     self.assertIs(node[test_attr], node[test_attr])
@@ -75,9 +79,9 @@ class ModuleNodeTC(TestCase):
         red = MODULE.igetattr('redirect').next()
         self.assertIsInstance(red, nodes.Function)
         self.assertEqual(red.name, 'four_args')
-        spawn = MODULE.igetattr('spawn').next()
-        self.assertIsInstance(spawn, nodes.Class)
-        self.assertEqual(spawn.name, 'Execute')
+        pb = MODULE.igetattr('pb').next()
+        self.assertIsInstance(pb, nodes.Class)
+        self.assertEqual(pb.name, 'ProgressBar')
         # resolve packageredirection
         sys.path.insert(1, DATA)
         mod = abuilder.file_build(join(DATA, 'appl/myConnection.py'),
@@ -164,6 +168,18 @@ del appli
             del sys.path[1]
 
 
+    def test_file_stream_in_memory(self):
+        data = '''irrelevant_variable is irrelevant'''
+        astroid = abuilder.string_build(data, 'in_memory')
+        self.assertEqual(astroid.file_stream.read().decode(), data)
+
+    def test_file_stream_physical(self):
+        path = join(DATA, 'all.py')
+        astroid = abuilder.file_build(path, 'all')
+        with open(path, 'rb') as file_io:
+            self.assertEqual(astroid.file_stream.read(), file_io.read())
+
+
 class FunctionNodeTC(TestCase):
 
     def test_special_attributes(self):
@@ -248,7 +264,7 @@ def nested_args(a, (b, c, d)):
         # non regression : test raise "string" doesn't cause an exception in is_abstract
         func = MODULE2['raise_string']
         self.assertFalse(func.is_abstract(pass_is_abstract=False))
-        
+
     def test_is_abstract_decorated(self):
         methods = extract_node("""
         import abc
@@ -257,11 +273,11 @@ def nested_args(a, (b, c, d)):
             @abc.abstractproperty
             def prop(self):  #@
                pass
-            
+
             @abc.abstractmethod
             def method1(self):  #@
                pass
-             
+
             some_other_decorator = lambda x: x
             @some_other_decorator
             def method2(self):  #@
@@ -383,7 +399,8 @@ class ClassNodeTC(TestCase):
         self.assertIsInstance(cls.getattr('__module__')[0], nodes.Const)
         self.assertEqual(cls.getattr('__module__')[0].value, 'data.module')
         self.assertEqual(len(cls.getattr('__dict__')), 1)
-        self.assertRaises(NotFoundError, cls.getattr, '__mro__')
+        if not cls.newstyle:
+            self.assertRaises(NotFoundError, cls.getattr, '__mro__')
         for cls in (nodes.List._proxied, nodes.Const(1)._proxied):
             self.assertEqual(len(cls.getattr('__bases__')), 1)
             self.assertEqual(len(cls.getattr('__name__')), 1)
@@ -492,6 +509,11 @@ A.__bases__ += (B,)
         self.assertEqual(klass.type, 'interface')
         klass = MODULE2['MyError']
         self.assertEqual(klass.type, 'exception')
+        # the following class used to be detected as a metaclass
+        # after the fix which used instance._proxied in .ancestors(),
+        # when in fact it is a normal class
+        klass = MODULE2['NotMetaclass']
+        self.assertEqual(klass.type, 'class')
 
     def test_interfaces(self):
         for klass, interfaces in (('Concrete0', ['MyIFace']),
@@ -662,6 +684,129 @@ def g2():
         self.assertEqual(astroid['g2'].fromlineno, 9)
         self.assertEqual(astroid['g2'].tolineno, 10)
 
+    def test_simple_metaclass(self):
+        astroid = abuilder.string_build(dedent("""
+        class Test(object):
+            __metaclass__ = type
+        """))
+        klass = astroid['Test']
+
+        metaclass = klass.metaclass()
+        self.assertIsInstance(metaclass, scoped_nodes.Class)
+        self.assertEqual(metaclass.name, 'type')
+
+    def test_metaclass_error(self):
+        astroid = abuilder.string_build(dedent("""
+        class Test(object):
+            __metaclass__ = typ
+        """))
+        klass = astroid['Test']
+        self.assertFalse(klass.metaclass())
+
+    @require_version('2.7')
+    def test_metaclass_imported(self):
+        astroid = abuilder.string_build(dedent("""
+        from abc import ABCMeta
+        class Test(object):
+            __metaclass__ = ABCMeta
+        """))
+        klass = astroid['Test']
+
+        metaclass = klass.metaclass()
+        self.assertIsInstance(metaclass, scoped_nodes.Class)
+        self.assertEqual(metaclass.name, 'ABCMeta')
+
+    def test_metaclass_yes_leak(self):
+        astroid = abuilder.string_build(dedent("""
+        # notice `ab` instead of `abc`
+        from ab import ABCMeta
+
+        class Meta(object):
+            __metaclass__ = ABCMeta
+        """))
+        klass = astroid['Meta']
+        self.assertIsNone(klass.metaclass())
+
+    @require_version('2.7')
+    def test_newstyle_and_metaclass_good(self):
+        astroid = abuilder.string_build(dedent("""
+        from abc import ABCMeta
+        class Test:
+            __metaclass__ = ABCMeta
+        """))
+        klass = astroid['Test']
+        self.assertTrue(klass.newstyle)
+
+    def test_newstyle_and_metaclass_bad(self):
+        astroid = abuilder.string_build(dedent("""
+        class Test:
+            __metaclass__ = int
+        """))
+        klass = astroid['Test']
+        if PY3K:
+            self.assertTrue(klass.newstyle)
+        else:
+            self.assertFalse(klass.newstyle)
+
+    @require_version('2.7')
+    def test_parent_metaclass(self):
+        astroid = abuilder.string_build(dedent("""
+        from abc import ABCMeta
+        class Test:
+            __metaclass__ = ABCMeta
+        class SubTest(Test): pass
+        """))
+        klass = astroid['SubTest']
+        self.assertTrue(klass.newstyle)
+        metaclass = klass.metaclass()
+        self.assertIsInstance(metaclass, scoped_nodes.Class)
+        self.assertEqual(metaclass.name, 'ABCMeta')
+
+    def test_metaclass_ancestors(self):
+        astroid = abuilder.string_build(dedent("""
+        from abc import ABCMeta
+
+        class FirstMeta(object):
+            __metaclass__ = ABCMeta
+
+        class SecondMeta(object):
+            __metaclass__ = type
+
+        class Simple(object):
+            pass
+
+        class FirstImpl(FirstMeta): pass
+        class SecondImpl(FirstImpl): pass
+        class ThirdImpl(Simple, SecondMeta):
+            pass
+        """))
+        classes = {
+            'ABCMeta': ('FirstImpl', 'SecondImpl'),
+            'type': ('ThirdImpl', )
+        }
+        for metaclass, names in classes.items():
+            for name in names:
+                impl = astroid[name]
+                meta = impl.metaclass()
+                self.assertIsInstance(meta, nodes.Class)
+                self.assertEqual(meta.name, metaclass)
+
+    def test_nonregr_infer_callresult(self):
+        astroid = abuilder.string_build(dedent("""
+        class Delegate(object):
+            def __get__(self, obj, cls):
+                return getattr(obj._subject, self.attribute)
+
+        class CompositeBuilder(object):
+            __call__ = Delegate()
+
+        builder = CompositeBuilder(result, composite)
+        tgts = builder()
+        """))
+        instance = astroid['tgts']
+        # used to raise "'_Yes' object is not iterable", see
+        # https://bitbucket.org/logilab/astroid/issue/17
+        self.assertEqual(list(instance.infer()), [YES])
 
 __all__ = ('ModuleNodeTC', 'ImportNodeTC', 'FunctionNodeTC', 'ClassNodeTC')
 

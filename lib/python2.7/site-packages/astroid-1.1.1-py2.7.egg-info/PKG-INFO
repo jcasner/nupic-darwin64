@@ -1,6 +1,6 @@
 Metadata-Version: 1.1
 Name: astroid
-Version: 1.0.1
+Version: 1.1.1
 Summary: rebuild a new abstract syntax tree from Python's ast
 Home-page: http://bitbucket.org/logilab/astroid
 Author: Logilab
